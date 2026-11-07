@@ -1,0 +1,176 @@
+name: Build Flashlight IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create source files
+        run: |
+          mkdir -p Flashlight
+          cat > Flashlight/FlashlightApp.swift << 'EOF'
+          import SwiftUI
+
+          @main
+          struct FlashlightApp: App {
+              var body: some Scene {
+                  WindowGroup {
+                      ContentView()
+                  }
+              }
+          }
+          EOF
+
+          cat > Flashlight/TorchManager.swift << 'EOF'
+          import Foundation
+          import AVFoundation
+
+          final class TorchManager: ObservableObject {
+              @Published private(set) var isOn = false
+
+              private var device: AVCaptureDevice? {
+                  AVCaptureDevice.default(for: .video)
+              }
+
+              var hasTorch: Bool {
+                  device?.hasTorch ?? false
+              }
+
+              func toggle() {
+                  guard let device = device, device.hasTorch, device.isTorchAvailable else { return }
+                  do {
+                      try device.lockForConfiguration()
+                      if isOn {
+                          device.torchMode = .off
+                      } else {
+                          try device.setTorchModeOn(level: AVCaptureDevice.maxAvailableTorchLevel)
+                      }
+                      device.unlockForConfiguration()
+                      isOn.toggle()
+                  } catch {
+                      print("Torch error: \(error)")
+                  }
+              }
+
+              func turnOff() {
+                  guard let device = device, device.hasTorch else { return }
+                  do {
+                      try device.lockForConfiguration()
+                      device.torchMode = .off
+                      device.unlockForConfiguration()
+                  } catch {
+                      print("Off error: \(error)")
+                  }
+                  isOn = false
+              }
+          }
+          EOF
+
+          cat > Flashlight/ContentView.swift << 'EOF'
+          import SwiftUI
+
+          struct ContentView: View {
+              @StateObject private var torch = TorchManager()
+
+              var body: some View {
+                  VStack(spacing: 40) {
+                      Image(systemName: torch.isOn ? "flashlight.on.fill" : "flashlight.off.fill")
+                          .font(.system(size: 100))
+                          .foregroundColor(torch.isOn ? .yellow : .gray)
+
+                      Button {
+                          torch.toggle()
+                      } label: {
+                          Text(torch.isOn ? "关闭" : "开启")
+                              .font(.title2.bold())
+                              .frame(maxWidth: .infinity)
+                              .padding(.vertical, 18)
+                              .background(torch.isOn ? Color.red : Color.green)
+                              .foregroundColor(.white)
+                              .clipShape(RoundedRectangle(cornerRadius: 16))
+                      }
+                      .padding(.horizontal, 40)
+                      .disabled(!torch.hasTorch)
+
+                      if !torch.hasTorch {
+                          Text("该设备没有可用的闪光灯")
+                              .foregroundColor(.secondary)
+                              .font(.footnote)
+                      }
+                  }
+                  .onDisappear { torch.turnOff() }
+              }
+          }
+          EOF
+
+      - name: Create XcodeGen project file
+        run: |
+          cat > project.yml << 'EOF'
+          name: Flashlight
+          options:
+            bundleIdPrefix: com.example
+            deploymentTarget:
+              iOS: "14.0"
+          targets:
+            Flashlight:
+              type: application
+              platform: iOS
+              sources: [Flashlight]
+              info:
+                path: Flashlight/Info.plist
+                properties:
+                  CFBundleDisplayName: 手电筒
+                  NSCameraUsageDescription: 需要访问相机以控制设备闪光灯
+                  UILaunchScreen: {}
+                  UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+              settings:
+                base:
+                  PRODUCT_BUNDLE_IDENTIFIER: com.example.flashlight
+                  CODE_SIGNING_ALLOWED: "NO"
+                  CODE_SIGN_IDENTITY: ""
+                  CODE_SIGNING_REQUIRED: "NO"
+          schemes:
+            Flashlight:
+              build:
+                targets:
+                  Flashlight: all
+              run:
+                config: Release
+          EOF
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build app
+        run: |
+          xcodebuild -project Flashlight.xcodeproj \
+            -scheme Flashlight \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            build
+
+      - name: Package IPA
+        run: |
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/Flashlight.app Payload/
+          zip -r Flashlight.ipa Payload
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: Flashlight-IPA
+          path: Flashlight.ipa
+          retention-days: 7
